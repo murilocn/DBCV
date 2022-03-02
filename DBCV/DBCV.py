@@ -8,12 +8,12 @@ Society for Industrial and Applied Mathematics, 2014.
 """
 
 import numpy as np
-from scipy.spatial.distance import euclidean, cdist
+from scipy.spatial.distance import cdist
 from scipy.sparse.csgraph import minimum_spanning_tree
-from scipy.sparse import csgraph
+from scipy.sparse import lil_matrix, csgraph
 
 
-def DBCV(X, labels, dist_function=euclidean):
+def DBCV(X, labels, dist_function='euclidean'):
     """
     Density Based clustering validation
 
@@ -27,64 +27,40 @@ def DBCV(X, labels, dist_function=euclidean):
     Returns: cluster_validity (float)
         score in range[-1, 1] indicating validity of clustering assignments
     """
+    
+    #checking if partition has ate least 2 clusters, return 0 otherwise
+    clusters = set(labels) - {-1}
+    if len(clusters) < 2:
+        return 0 
+    
     graph = _mutual_reach_dist_graph(X, labels, dist_function)
     mst = _mutual_reach_dist_MST(graph)
     cluster_validity = _clustering_validity_index(mst, labels)
     return cluster_validity
 
 
-def _core_dist(point, neighbors, dist_function):
+def _core_dist(point, neighbors, dist, n_features):
     """
     Computes the core distance of a point.
     Core distance is the inverse density of an object.
 
     Args:
-        point (np.array): array of dimensions (n_features,)
-            point to compute core distance of
-        neighbors (np.ndarray): array of dimensions (n_neighbors, n_features):
-            array of all other points in object class
-        dist_dunction (func): function to determine distance between objects
-            func args must be [np.array, np.array] where each array is a point
+        point (int): number of the point in the dataset
+        neighbors (np.ndarray): array of dimensions (n_neighbors, 1):
+            array of all other points indexes in object class
+        dist (np.ndarray): array of dimensions (n, n):
+            precalculated distances between all points
 
     Returns: core_dist (float)
         inverse density of point
     """
-    n_features = np.shape(point)[0]
-    n_neighbors = np.shape(neighbors)[0]
-
-    distance_vector = cdist(point.reshape(1, -1), neighbors)
+    
+    n_neighbors = len(neighbors)
+    distance_vector = dist[point][neighbors]
     distance_vector = distance_vector[distance_vector != 0]
     numerator = ((1/distance_vector)**n_features).sum()
     core_dist = (numerator / (n_neighbors - 1)) ** (-1/n_features)
     return core_dist
-
-
-def _mutual_reachability_dist(point_i, point_j, neighbors_i,
-                              neighbors_j, dist_function):
-    """.
-    Computes the mutual reachability distance between points
-
-    Args:
-        point_i (np.array): array of dimensions (n_features,)
-            point i to compare to point j
-        point_j (np.array): array of dimensions (n_features,)
-            point i to compare to point i
-        neighbors_i (np.ndarray): array of dims (n_neighbors, n_features):
-            array of all other points in object class of point i
-        neighbors_j (np.ndarray): array of dims (n_neighbors, n_features):
-            array of all other points in object class of point j
-        dist_dunction (func): function to determine distance between objects
-            func args must be [np.array, np.array] where each array is a point
-
-    Returns: mutual_reachability (float)
-        mutual reachability between points i and j
-
-    """
-    core_dist_i = _core_dist(point_i, neighbors_i, dist_function)
-    core_dist_j = _core_dist(point_j, neighbors_j, dist_function)
-    dist = dist_function(point_i, point_j)
-    mutual_reachability = np.max([core_dist_i, core_dist_j, dist])
-    return mutual_reachability
 
 
 def _mutual_reach_dist_graph(X, labels, dist_function):
@@ -104,25 +80,26 @@ def _mutual_reach_dist_graph(X, labels, dist_function):
         Graph of all pair-wise mutual reachability distances between points.
 
     """
-    n_samples = np.shape(X)[0]
-    graph = []
-    counter = 0
+    
+    #calculating basic statistics
+    n_samples, n_features = np.shape(X)
+    graph = lil_matrix((n_samples,n_samples))
+    dist = cdist(X, X, metric=dist_function)
+    
+    #calculating apts core distances
+    core_distances = np.zeros(n_samples)
+    for i in range(n_samples):
+        if labels[i] != -1 :
+            members_i = np.where(labels == labels[i])[0]  
+            core_distances[i] = _core_dist(i, members_i, dist, n_features)
+            
+    #filling mutual reach matrix        
     for row in range(n_samples):
-        graph_row = []
-        for col in range(n_samples):
-            point_i = X[row]
-            point_j = X[col]
-            class_i = labels[row]
-            class_j = labels[col]
-            members_i = _get_label_members(X, labels, class_i)
-            members_j = _get_label_members(X, labels, class_j)
-            dist = _mutual_reachability_dist(point_i, point_j,
-                                             members_i, members_j,
-                                             dist_function)
-            graph_row.append(dist)
-        counter += 1
-        graph.append(graph_row)
-    graph = np.array(graph)
+        for col in range(row+1,n_samples):
+            if (labels[row] != -1 and labels[col] != -1):
+                graph[row,col] = np.max([core_distances[row], core_distances[col], dist[row][col]])   
+                graph[col,row] = graph[row,col]
+            
     return graph
 
 
@@ -202,16 +179,12 @@ def _cluster_validity_index(MST, labels, cluster):
     """
     min_density_separation = np.inf
     for cluster_j in np.unique(labels):
-        if cluster_j != cluster:
-            cluster_density_separation = _cluster_density_separation(MST,
-                                                                     labels,
-                                                                     cluster,
-                                                                     cluster_j)
+        if cluster_j != cluster and cluster_j != -1:
+            cluster_density_separation = _cluster_density_separation(MST, labels, cluster, cluster_j)
             if cluster_density_separation < min_density_separation:
                 min_density_separation = cluster_density_separation
-    cluster_density_sparseness = _cluster_density_sparseness(MST,
-                                                             labels,
-                                                             cluster)
+                
+    cluster_density_sparseness = _cluster_density_sparseness(MST, labels, cluster)
     numerator = min_density_separation - cluster_density_sparseness
     denominator = np.max([min_density_separation, cluster_density_sparseness])
     cluster_validity = numerator / denominator
@@ -234,26 +207,15 @@ def _clustering_validity_index(MST, labels):
     n_samples = len(labels)
     validity_index = 0
     for label in np.unique(labels):
-        fraction = np.sum(labels == label) / float(n_samples)
-        cluster_validity = _cluster_validity_index(MST, labels, label)
-        validity_index += fraction * cluster_validity
+        if label != -1:
+            fraction = np.sum(labels == label) / float(n_samples)
+            cluster_validity = _cluster_validity_index(MST, labels, label)
+            validity_index += fraction * cluster_validity
+            
     return validity_index
 
 
-def _get_label_members(X, labels, cluster):
-    """
-    Helper function to get samples of a specified cluster.
 
-    Args:
-        X (np.ndarray): ndarray with dimensions [n_samples, n_features]
-            data to check validity of clustering
-        labels (np.array): clustering assignments for data X
-        cluster (int): cluster of interest
 
-    Returns: members (np.ndarray)
-        array of dimensions (n_samples, n_features) of samples of the
-        specified cluster.
-    """
-    indices = np.where(labels == cluster)[0]
-    members = X[indices]
-    return members
+
+
